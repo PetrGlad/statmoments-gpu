@@ -1,0 +1,5 @@
+cupy-cuda11x
+scipy
+numpy
+sympy
+
