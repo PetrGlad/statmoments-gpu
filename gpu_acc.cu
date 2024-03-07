@@ -38,9 +38,6 @@ void pairs_update(const int n,
                 acc_i++;
             }
         }
-
-        // FIXME 1.Reduce matrix acc size, 1. Update powers vector acc.
-
         powers_idx_b += max_single_p;
     }
 }
