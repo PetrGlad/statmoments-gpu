@@ -1,3 +1,4 @@
+# https://docs.cupy.dev/en/stable/user_guide/kernel.html
 import itertools as iter
 import math
 
@@ -18,33 +19,15 @@ n = 3  # Number of scalar values in a measurement X
 # Using sum to get all the values necessary for later calculations, as max(m) <= sum(m)
 max_single_p = sum(m)
 
-ck_powers = cp.RawKernel(
-    r"""
-  typedef double T;
-  
-  extern "C" __global__
-  void powers(const int p, const T* x, T* y) {
-    const int tid = blockDim.x * blockIdx.x + threadIdx.x;
-    const T z = x[tid];
-    T c = z;
-    int n = p;
-    int i = tid * p;
-    while (true) {
-        // printf("<%d (b=%d, t=%d)> [%d] at %d = %f # %d\n", tid, blockIdx.x, threadIdx.x, i, n, c, p);
-        y[i++] = c;
-        if (n <= 1) break;
-        n--;
-        c *= z;
-    }
-  }
-  """,
-    "powers",
-)
-
-print(ck_powers.attributes)
+with open('gpu_acc.cu', 'r') as f:
+    gpu_acc_source = f.read()
+gpu_acc_module = cp.RawModule(code=gpu_acc_source)
 
 # ---------- X POWERS ----------
 
+ck_powers = gpu_acc_module.get_function('powers')
+
+print(ck_powers.attributes)
 x = cp.arange(n, dtype=dtype) + 1
 print("> x=\n", x)
 x_powers = cp.zeros((n, max_single_p), dtype=dtype)
@@ -104,10 +87,7 @@ def acc_to_4d_numpy(n_rows, cell_size, acc):
 
 # ---------- X PAIRS ----------
 
-with open('gpu_acc.cu', 'r') as file:
-    ck_pairs_update_source = file.read()
-
-ck_pairs_update = cp.RawKernel(ck_pairs_update_source, "pairs_update")
+ck_pairs_update = gpu_acc_module.get_function('pairs_update')
 
 # n_acc_cols = n
 # n_acc_rows = math.ceil(n / 2)
@@ -138,7 +118,7 @@ print(f"Scheduling tasks as {n_blocks} x {block_size}")
 assert x_powers.size == n * max_single_p
 assert x_powers.shape == x_powers_acc.shape
 assert row_index[-1] == math.floor((acc_size + 1) * acc_size / 2) * cell_matrix_size
-assert acc_cell_size * acc_cell_size ==  cell_matrix_size
+assert acc_cell_size * acc_cell_size == cell_matrix_size
 ck_pairs_update((n_blocks,), (block_size,),
                 (n, max_single_p, x_powers, x_powers_acc, acc_cell_size, acc_row_indexes, acc))
 

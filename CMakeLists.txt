@@ -1518,4 +1518,5 @@ add_executable(statmoments_gpu
         venv/lib/python3.10/site-packages/scipy/special/special/lambertw.h
         venv/lib/python3.10/site-packages/scipy/special/_ufuncs_cxx_defs.h
         venv/lib/python3.10/site-packages/scipy/special/_ufuncs_defs.h
-        gpu_acc.cu)
+        gpu_acc.cu
+)

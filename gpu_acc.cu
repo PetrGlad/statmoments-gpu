@@ -1,6 +1,22 @@
 typedef double T;
 
 extern "C" __global__
+void powers(const int p, const T *x, T *y) {
+    const int tid = blockDim.x * blockIdx.x + threadIdx.x;
+    const T z = x[tid];
+    T c = z;
+    int n = p;
+    int i = tid * p;
+    while (true) {
+        // printf("<%d (b=%d, t=%d)> [%d] at %d = %f # %d\n", tid, blockIdx.x, threadIdx.x, i, n, c, p);
+        y[i++] = c;
+        if (n <= 1) break;
+        n--;
+        c *= z;
+    }
+}
+
+extern "C" __global__
 void pairs_update(const int n,
                   const int max_single_p, const T *x_powers, T *x_powers_acc,
                   const int cell_size, const int *acc_row_indexes, T *acc) {
@@ -28,6 +44,7 @@ void pairs_update(const int n,
     // +1 to exclude diagonal (calculated separately).
     const int powers_idx_a = powers_idx + 1;
     // For each pair cell of the triangle matrix row.
+    // Updating as lower triangle of cells (excluding diagonal).
     for (; acc_i < next_row_i; col_i++) {
         printf("|row acc_i %d, col_i %d\n", acc_i, col_i);
         for (int pa = 0; pa < cell_size; pa++) {
