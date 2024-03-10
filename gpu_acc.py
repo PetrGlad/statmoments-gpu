@@ -9,8 +9,6 @@ import scipy.linalg.blas as sblas
 import sympy as sy
 from sympy.plotting import plot
 
-print(cp.cuda.Device(), cp.cuda.device.get_compute_capability(), cp.cuda.get_current_stream())
-
 
 def triangle_row_starts():
     """Starting indices of a dense lower triangle matrix."""
@@ -58,6 +56,8 @@ def acc_to_4d_numpy(n_rows, cell_size, acc):
 
 # Floats type to use. Update CUDA kernels when changing this.
 DTYPE = cp.float64
+
+print(cp.cuda.Device(), cp.cuda.device.get_compute_capability(), cp.cuda.get_current_stream())
 
 with open('gpu_acc.cu', 'r') as f:
     gpu_acc_source = f.read()
@@ -145,7 +145,7 @@ class MomentsGpu:
         ms = cp.array(self.n_x)
 
         # TODO DRY Scheduling sizes calculation.
-        block_size = min(CK_PAIRS_UPDATE.max_threads_per_block, nx)
+        block_size = min(CK_PAIRS_UPDATE.max_threads_per_block, self.n_x)
         n_blocks = self.n_x // block_size
         if self.n_x % block_size != 0:
             n_blocks += 1
@@ -173,6 +173,12 @@ def test_acc_update_1():
                                 [3., 9., 27.]])
     assert np.array_equal(expected_powers, cp.asnumpy(acc.x_powers_acc))
 
+    # correlations = acc.moments((1, 1))
+    # expected_correlations = np.array([[0, 0, 0],
+    #                                   [0, 0, 0],
+    #                                   [0, 0, 0]])
+    # assert np.array_equal(expected_correlations, cp.asnumpy(correlations))
+
 
 def lab():
     # https://docs.cupy.dev/en/stable/user_guide/performance.html
@@ -182,13 +188,17 @@ def lab():
     x = cp.arange(nx, dtype=DTYPE) + 1
     print("> x=\n", x)
     acc.update(x)
+
+    cp.cuda.get_current_stream().synchronize()
     print(f"n={nx}, p={acc.max_single_p}")
-    print("> acc=\n", acc.pairs_acc)
-    print("> acc=\n", acc_to_2d_numpy(acc.pairs_acc_size, acc.pairs_acc_cell_size, acc.pairs_acc))
+    print("> acc=\n", cp.asnumpy(acc.pairs_acc))
+    pairs_acc_np = acc_to_2d_numpy(acc.pairs_acc_size, acc.pairs_acc_cell_size, acc.pairs_acc)
+    print("> acc=\n", pairs_acc_np)
 
 
 print("\n=== TESTS ===")
 test_acc_update_1()
+test_acc_update_1()  # Looking for conflicts. Second call should not fail :)
 print("TESTS OK\n")
 
 lab()
