@@ -1,6 +1,7 @@
 # https://docs.cupy.dev/en/stable/user_guide/kernel.html
 import itertools as iter
 import math
+import time
 
 import cupy as cp
 import numpy as np
@@ -73,7 +74,7 @@ CK_MOMENTS = GPU_ACC_MODULE.get_function('moments')
 
 
 class MomentsGpu:
-    def __init__(self, m: (int, int), n_x: int):
+    def __init__(self, m: tuple[int, int], n_x: int):
         # Required max moment's power degrees
         self.m = m
         # Number of scalar measurements in a sample X
@@ -103,6 +104,7 @@ class MomentsGpu:
         pairs_acc_length = row_index[-1]
         assert pairs_acc_length == math.floor(
             (self.pairs_acc_size + 1) * self.pairs_acc_size / 2) * self.cell_matrix_size
+        self.end_cell_i = row_index[-1]
         self.pairs_acc_row_indexes = cp.array(row_index, dtype=cp.uint32)
         self.pairs_acc = cp.zeros((pairs_acc_length,), dtype=DTYPE)
 
@@ -133,9 +135,13 @@ class MomentsGpu:
 
         print(f"Scheduling tasks as {n_blocks} x {block_size}")
         # Parameters are: grid (number of blocks), block size, followed by list of the kernel arguments.
+
+        assert self.pairs_acc_row_indexes[-1] == self.end_cell_i
         CK_PAIRS_UPDATE((n_blocks,), (block_size,),
                         (self.n_x, self.max_single_p, self.x_powers, self.x_powers_acc,
-                         self.pairs_acc_cell_size, self.pairs_acc_row_indexes, self.pairs_acc))
+                         self.pairs_acc_cell_size,
+                         self.end_cell_i, self.pairs_acc_row_indexes,
+                         self.pairs_acc))
 
     def moments(self, m):
         assert m[0] <= self.m[0] and m[1] <= self.m[1]
@@ -159,13 +165,13 @@ def test_acc_update_1():
     nx = 3
     acc = MomentsGpu((1, 2), nx)
     x = cp.arange(nx, dtype=DTYPE) + 1
+    print(f"> acc.pairs_acc.shape= {acc.pairs_acc.shape}")
     acc.update(x)
-
     expected_pairs = np.array([[2., 2., 0., 0.],
                                [4., 4., 0., 0.],
                                [3., 3., 6., 12.],
                                [9., 9., 18., 36.]])
-    actual_pairs = acc_to_2d_numpy(acc.pairs_acc_size, acc.pairs_acc_cell_size, acc.pairs_acc)
+    actual_pairs = acc_to_2d_numpy(acc.pairs_acc_size, acc.pairs_acc_cell_size, cp.asnumpy(acc.pairs_acc))
     assert np.array_equal(expected_pairs, actual_pairs)
 
     expected_powers = np.array([[1., 1., 1.],
@@ -191,13 +197,15 @@ def lab():
 
     cp.cuda.get_current_stream().synchronize()
     print(f"n={nx}, p={acc.max_single_p}")
-    print("> acc=\n", cp.asnumpy(acc.pairs_acc))
-    pairs_acc_np = acc_to_2d_numpy(acc.pairs_acc_size, acc.pairs_acc_cell_size, acc.pairs_acc)
+    pairs_acc = cp.asnumpy(acc.pairs_acc)
+    print("> acc=\n", pairs_acc)
+    pairs_acc_np = acc_to_2d_numpy(acc.pairs_acc_size, acc.pairs_acc_cell_size, pairs_acc)
     print("> acc=\n", pairs_acc_np)
 
 
 print("\n=== TESTS ===")
 test_acc_update_1()
+# cp.cuda.get_current_stream().synchronize()
 test_acc_update_1()  # Looking for conflicts. Second call should not fail :)
 print("TESTS OK\n")
 
