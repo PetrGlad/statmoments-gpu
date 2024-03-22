@@ -58,7 +58,7 @@ def acc_to_4d_numpy(n_rows, cell_size, acc):
 # Floats type to use. Update CUDA kernels when changing this.
 DTYPE = cp.float64
 
-print(cp.cuda.Device(), cp.cuda.device.get_compute_capability(), cp.cuda.get_current_stream())
+print("CUDA status:", cp.cuda.Device(), cp.cuda.device.get_compute_capability(), cp.cuda.get_current_stream())
 
 with open('gpu_acc.cu', 'r') as f:
     gpu_acc_source = f.read()
@@ -74,19 +74,25 @@ CK_MOMENTS = GPU_ACC_MODULE.get_function('moments')
 
 
 class MomentsGpu:
-    def __init__(self, m: tuple[int, int], n_x: int):
+    def __init__(self, m: tuple[int, int], n_x: int, x_bias=None):
         # Required max moment's power degrees
         self.m = m
         # Number of scalar measurements in a sample X
         self.n_x = n_x
+        # Estimated mean to subtract from samples.
+        assert x_bias is None or x_bias.shape == (self.n_x,)
+        if x_bias is not None:
+            self.x_bias = x_bias
+        else:
+            self.x_bias = np.zeros((1, self.n_x), dtype=DTYPE)
         # Max power degree to calc for each variable. max(m) for off-diagonal, sum(m) on the diagonal
         # Using sum to get all the values necessary for later calculations, as max(m) <= sum(m)
-        self.max_single_p = sum(m)
-        # Sums of single measurement powers
-        self.x_powers = cp.zeros((n_x, self.max_single_p), dtype=DTYPE)
+        self.max_single_pow = sum(m)
+        # Sums of a single measurement powers. It is re-used on subsequent updates.
+        self.x_powers = cp.zeros((n_x, self.max_single_pow), dtype=DTYPE)
         # Accumulates power sums of each variable
-        self.x_powers_acc = cp.zeros((n_x, self.max_single_p), dtype=DTYPE)
-        assert self.x_powers.size == self.n_x * self.max_single_p
+        self.x_powers_acc = cp.zeros((n_x, self.max_single_pow), dtype=DTYPE)
+        assert self.x_powers.size == self.n_x * self.max_single_pow
         assert self.x_powers.shape == self.x_powers_acc.shape
 
         self.pairs_acc_cell_size = max(m)
@@ -105,49 +111,52 @@ class MomentsGpu:
         assert pairs_acc_length == math.floor(
             (self.pairs_acc_size + 1) * self.pairs_acc_size / 2) * self.cell_matrix_size
         self.end_cell_i = row_index[-1]
-        self.pairs_acc_row_indexes = cp.array(row_index, dtype=cp.uint32)
+        self.pairs_acc_row_is = cp.array(row_index, dtype=cp.uint32)
         self.pairs_acc = cp.zeros((pairs_acc_length,), dtype=DTYPE)
 
         # Number of processed samples
-        self.n_updates = 0
+        self.n_samples = 0
 
-    def update(self, x):
-        # Just curious, if it holds
+    def update(self, xs):
+        # Just curious, if this holds:
         assert CK_POWERS.max_threads_per_block == CK_PAIRS_UPDATE.max_threads_per_block
-        assert x.size == self.n_x
+        assert xs.shape[1] == self.n_x
 
         # TODO DRY Scheduling sizes calculation.
         block_size = min(CK_POWERS.max_threads_per_block, self.n_x)
         n_blocks = self.n_x // block_size
         if self.n_x % block_size != 0:
             n_blocks += 1
-        print(n_blocks, block_size)
 
-        CK_POWERS((n_blocks,), (block_size,),
-                  (self.max_single_p, x, self.x_powers))  # grid (number of blocks), block and arguments
-        print("> x_powers=\n", self.x_powers)
+        # TODO Update for whole batch in the same operation.
+        for i in range(xs.shape[0]):
+            x = cp.array(np.subtract(xs[i], self.x_bias))
+            CK_POWERS((n_blocks,), (block_size,),
+                      (self.max_single_pow, x, self.x_powers))  # grid (number of blocks), block and arguments
+            print("> x_powers=\n", self.x_powers)
 
-        # TODO DRY Scheduling sizes calculation.
-        block_size = min(CK_PAIRS_UPDATE.max_threads_per_block, self.n_x)
-        n_blocks = self.n_x // block_size
-        if self.n_x % block_size != 0:
-            n_blocks += 1
+            # TODO DRY Scheduling sizes calculation.
+            block_size = min(CK_PAIRS_UPDATE.max_threads_per_block, self.n_x)
+            n_blocks = self.n_x // block_size
+            if self.n_x % block_size != 0:
+                n_blocks += 1
 
-        print(f"Scheduling tasks as {n_blocks} x {block_size}")
-        # Parameters are: grid (number of blocks), block size, followed by list of the kernel arguments.
+            print(f"Scheduling tasks as {n_blocks} x {block_size}")
+            # Parameters are: grid (number of blocks), block size, followed by list of the kernel arguments.
 
-        assert self.pairs_acc_row_indexes[-1] == self.end_cell_i
-        CK_PAIRS_UPDATE((n_blocks,), (block_size,),
-                        (self.n_x, self.max_single_p, self.x_powers, self.x_powers_acc,
-                         self.pairs_acc_cell_size,
-                         self.end_cell_i, self.pairs_acc_row_indexes,
-                         self.pairs_acc))
+            assert self.pairs_acc_row_is[-1] == self.end_cell_i
+            CK_PAIRS_UPDATE((n_blocks,), (block_size,),
+                            (self.n_x, self.max_single_pow, self.x_powers, self.x_powers_acc,
+                             self.pairs_acc_cell_size,
+                             self.end_cell_i, self.pairs_acc_row_is,
+                             self.pairs_acc))
+            self.n_samples += 1
 
     def moments(self, m):
         assert m[0] <= self.m[0] and m[1] <= self.m[1]
 
-        # TODO Implement generic case.
-        assert m == (1, 1)
+        # TODO (Implement) Generic case of (m1,m2)
+        assert m == (1, 1), "Only covariance is supported. Generic case is not implemented yet."
         ms = cp.array(self.n_x)
 
         # TODO DRY Scheduling sizes calculation.
@@ -156,16 +165,28 @@ class MomentsGpu:
         if self.n_x % block_size != 0:
             n_blocks += 1
 
-        CK_MOMENTS((n_blocks,), (block_size,), (m[0], m[1], ms))
-
+        # const int m1, const int m2, const T n_samples, const int dim_x,
+        # const int max_single_p, const T *x_powers_acc,
+        # const int pair_cell_size, const int end_cell_i, const int *pair_acc_cell_row_is, const T *pair_acc,
+        # T *moments
+        CK_MOMENTS((n_blocks,), (block_size,),
+                   (m[0], m[1], self.n_samples, self.n_x,
+                    self.max_single_pow, self.x_powers_acc,
+                    self.pairs_acc_cell_size,
+                    self.end_cell_i, self.pairs_acc_row_is,
+                    self.pairs_acc,
+                    ms))
         return ms
+
+
+def mean(batch_xs):
+    return np.mean(batch_xs, 0)
 
 
 def test_acc_update_1():
     nx = 3
     acc = MomentsGpu((1, 2), nx)
-    x = cp.arange(nx, dtype=DTYPE) + 1
-    print(f"> acc.pairs_acc.shape= {acc.pairs_acc.shape}")
+    x = (np.arange(nx, dtype=DTYPE) + 1).reshape((1, nx))
     acc.update(x)
     expected_pairs = np.array([[2., 2., 0., 0.],
                                [4., 4., 0., 0.],
@@ -179,24 +200,51 @@ def test_acc_update_1():
                                 [3., 9., 27.]])
     assert np.array_equal(expected_powers, cp.asnumpy(acc.x_powers_acc))
 
+    # TODO Test correlation.
     # correlations = acc.moments((1, 1))
-    # expected_correlations = np.array([[0, 0, 0],
-    #                                   [0, 0, 0],
-    #                                   [0, 0, 0]])
+    # expected_correlations = np.array([0, 0, 0])
+    # assert np.array_equal(expected_correlations, cp.asnumpy(correlations))
+
+
+def test_acc_update_detrend():
+    nx = 3
+    n_samples = 5
+    batch_x = (cp.arange(nx * n_samples, dtype=DTYPE) + 1).reshape((5, nx))
+    print("batch:\n", batch_x)
+    mean = np.mean(batch_x, 0)
+    acc = MomentsGpu((1, 2), nx, x_bias=mean)
+    acc.update(batch_x)
+    acc.update(batch_x)
+    acc.update(batch_x)
+    expected_pairs = np.array([[2., 2., 0., 0.],
+                               [4., 4., 0., 0.],
+                               [3., 3., 6., 12.],
+                               [9., 9., 18., 36.]])
+    actual_pairs = acc_to_2d_numpy(acc.pairs_acc_size, acc.pairs_acc_cell_size, cp.asnumpy(acc.pairs_acc))
+    assert np.array_equal(expected_pairs, actual_pairs)
+
+    expected_powers = np.array([[1., 1., 1.],
+                                [2., 4., 8.],
+                                [3., 9., 27.]])
+    assert np.array_equal(expected_powers, cp.asnumpy(acc.x_powers_acc))
+
+    # TODO Test correlation.
+    # correlations = acc.moments((1, 1))
+    # expected_correlations = np.array([0, 0, 0])
     # assert np.array_equal(expected_correlations, cp.asnumpy(correlations))
 
 
 def lab():
     # https://docs.cupy.dev/en/stable/user_guide/performance.html
-    nx = 3
-    m = 1, 2
+    nx = 5000
+    m = 4, 4
     acc = MomentsGpu(m, nx)
-    x = cp.arange(nx, dtype=DTYPE) + 1
+    x = (cp.arange(nx, dtype=DTYPE) + 1).reshape((1, nx))
     print("> x=\n", x)
     acc.update(x)
 
     cp.cuda.get_current_stream().synchronize()
-    print(f"n={nx}, p={acc.max_single_p}")
+    print(f"n={nx}, p={acc.max_single_pow}")
     pairs_acc = cp.asnumpy(acc.pairs_acc)
     print("> acc=\n", pairs_acc)
     pairs_acc_np = acc_to_2d_numpy(acc.pairs_acc_size, acc.pairs_acc_cell_size, pairs_acc)
@@ -205,9 +253,10 @@ def lab():
 
 print("\n=== TESTS ===")
 test_acc_update_1()
-# cp.cuda.get_current_stream().synchronize()
-test_acc_update_1()  # Looking for conflicts. Second call should not fail :)
+test_acc_update_1()  # Looking for memory conflicts. Second call should not fail :)
+test_acc_update_detrend()
 print("TESTS OK\n")
 
-lab()
+# lab()
 print("\nDONE")
+
